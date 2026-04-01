@@ -1,0 +1,19 @@
+#include <cstdint>
+
+static constexpr uint16_t FLAG_ACK = 0x1;
+static constexpr uint16_t FLAG_SYN = 0x2;
+static constexpr uint16_t FLAG_FIN = 0x4;
+
+static constexpr uint16_t DATA_LEN_MASK = 0x1FFF;
+
+inline uint16_t unpack_data_len(uint16_t data_flags) {
+    return static_cast<uint16_t>((data_flags >> 3) & DATA_LEN_MASK);
+}
+
+inline uint16_t unpack_flags(uint16_t data_flags){
+    return static_cast<uint16_t>(data_flags & 0x7);
+}
+
+inline bool is_ack(uint16_t data_flags){
+    return(data_flags & FLAG_ACK) != 0;
+}
