@@ -48,6 +48,8 @@ int main() {
             }
             std::cout << "Accepted a connection" << std::endl;
 
+            send(client_sock, "Hello, Client!", 14, 0);
+
             close(client_sock);
         }
     } catch(const std::exception& e) {
