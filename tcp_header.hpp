@@ -28,4 +28,17 @@ namespace tcp_header{
     inline bool is_ack(uint16_t data_flags){
         return(data_flags & FLAG_ACK) != 0;
     }
+
+    static inline uint16_t pack_data_flags(uint16_t data_len, uint16_t flags) {
+        return static_cast<uint16_t>(((data_len & tcp_header::DATA_LEN_MASK) << 3) | (flags & 0x7));
+    }
+
+    static inline bool send_header(int sock, const Header& header, const sockaddr_in& addr){
+        return sendto(sock, &header, sizeof(header), 0, (const sockaddr*)&addr, sizeof(addr)) == (ssize_t)sizeof(header); 
+    }
+
+    static inline bool recv_header(int sock, Header& header, const sockaddr_in& recv_addr){
+        return recvfrom(sock, &header, sizeof(header), 0, (sockaddr*)&recv_addr, (socklen_t*)sizeof(recv_addr)) == (ssize_t)sizeof(header);
+    }
+
 }

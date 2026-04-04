@@ -20,7 +20,7 @@ static int RTO = 50; //Retransmission Timeout in milliseconds
 int max_package_size = MSS + sizeof(Header); //Maximum package size
 int initial_SSTHRESH = 15360; //Initial Slow Start Threshold
 
-
+//Server address structure
 struct sockaddr_in server_addr{
     .sin_family = AF_INET,
     .sin_port = htons(PORT),
@@ -28,29 +28,85 @@ struct sockaddr_in server_addr{
     .sin_zero = {0}
 };
 
- bool estabilish_connection(){
+bool estabilish_connection(){
     try{
-
-        int sckt = socket(AF_INET, SOCK_STREAM, 0);
-        if(sckt < 0) {
+        int sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if(sock < 0){
             std::cerr << "Error creating socket" << std::endl;
-            return 0;
+            return false;
         }
-        if(connect(sckt, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-            std::cerr << "Error connecting to server" << std::endl;
-            close(sckt);
-            return 0;
+
+        //Timeout configuration
+        timeval timeout;
+        timeout.tv_sec = RTO / 1000;
+        timeout.tv_usec = (RTO % 1000) * 1000;
+
+        if(setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0){
+            std::cerr << "Error setting socket timeout" << std::endl;
+            close(sock);
+            return false;
         }
-        std::cout << "Connected to server at " << inet_ntoa(server_addr.sin_addr) << ":" << PORT << std::endl;
 
-        send(sckt, "Hello, Server!", 14, 0);
-        std::cout << "Sent message to server" << std::endl;
+        //HANDSHAKE
+        //generate random initial sequence number
+        std::srand(static_cast<unsigned int>(time(nullptr)));
+        uint16_t client_isn = static_cast<uint16_t>(1000 + std::rand() % 10000);
 
-        char response[1024];
-        recv(sckt, response, sizeof(response), 0);
-        std::cout << "Received response from server: " << response << std::endl;
+        //Send SYN
+        Header syn{
+            .seq_number = htons(client_isn),
+            .ack_number = htons(0),
+            .rwnd = htons(0),
+            .data_flags = htons(tcp_header::pack_data_flags(0, tcp_header::FLAG_SYN))
+        };
+
+        if(!tcp_header::send_header(sock, syn, server_addr)){
+            std::cerr << "Error sending SYN" << std::endl;
+            close(sock);
+            return false;
+        }
+        std::cout << "SYN sent with ISN: " << client_isn << std::endl;
+
+        //Recv SYN-ACK
+        Header syn_ack{};
+        sockaddr_in recv_addr{};
+        if(!tcp_header::recv_header(sock, syn_ack, recv_addr)){
+            std::cerr << "Error receiving SYN-ACK" << std::endl;
+            close(sock);
+            return false;
+        }
+
+        uint16_t syn_ack_flags = tcp_header::unpack_flags(ntohs(syn_ack.data_flags));
         
-        return 1;
+        bool valid_syn_ack = ((syn_ack_flags & tcp_header::FLAG_SYN) != 0) && 
+                             ((syn_ack_flags & tcp_header::FLAG_ACK) != 0) &&
+                             (ntohs(syn_ack.ack_number) == static_cast<uint16_t>(client_isn + 1));
+
+        if(!valid_syn_ack){
+            std::cerr << "Invalid SYN-ACK received" << std::endl;
+            close(sock);
+            return false;
+        }
+        std::cout << "SYN-ACK received with ISN: " << ntohs(syn_ack.seq_number) << std::endl;
+
+        //final ACK
+        Header ack{
+            .seq_number = htons(static_cast<uint16_t>(client_isn + 1)),
+            .ack_number = htons(static_cast<uint16_t>(syn_ack.seq_number)),
+            .rwnd = htons(0),
+            .data_flags = htons(tcp_header::pack_data_flags(0, tcp_header::FLAG_ACK))
+        };
+
+        if(!tcp_header::send_header(sock, ack, server_addr)){
+            std::cerr << "Error sending ACK" << std::endl;
+            close(sock);
+            return false;
+        }
+        std::cout << "ACK sent, connection established" << std::endl;
+        std::cout << "TCP Connection established with server at " << inet_ntoa(server_addr.sin_addr) << ":" << ntohs(server_addr.sin_port) << std::endl;
+
+        close(sock);
+        return true;
 
     } catch(const std::exception& e) {
         std::cerr << "Failed to connect to server: " << e.what() << std::endl;
@@ -60,11 +116,10 @@ struct sockaddr_in server_addr{
 
 int main() {
     
-    if (estabilish_connection()){
-        std::cout << "Connection established successfully!" << std::endl;
-    } else {
+    if (!estabilish_connection()){
         std::cerr << "Failed to establish connection." << std::endl;
-    }
+    } 
+    std::cout << "Connection established successfully!" << std::endl;
 
     return 0;
 }
