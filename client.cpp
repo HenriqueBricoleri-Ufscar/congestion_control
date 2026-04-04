@@ -10,8 +10,8 @@
 using tcp_header::Header;
 
 //server details
-int PORT = 8080;
-in_addr_t HOST = inet_addr("127.0.0.1");
+const static int PORT = 8086;
+const static in_addr_t HOST = inet_addr("127.0.0.1");
 
 //TCP parameters
 int CWND = 1024; //Congestion Window Size
@@ -90,9 +90,11 @@ bool estabilish_connection(){
         std::cout << "SYN-ACK received with ISN: " << ntohs(syn_ack.seq_number) << std::endl;
 
         //final ACK
+        uint16_t server_isn = ntohs(syn_ack.seq_number);
+
         Header ack{
             .seq_number = htons(static_cast<uint16_t>(client_isn + 1)),
-            .ack_number = htons(static_cast<uint16_t>(syn_ack.seq_number)),
+            .ack_number = htons(static_cast<uint16_t>(server_isn + 1)),
             .rwnd = htons(0),
             .data_flags = htons(tcp_header::pack_data_flags(0, tcp_header::FLAG_ACK))
         };

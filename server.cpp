@@ -9,9 +9,11 @@
 
 using tcp_header::Header;
 
-int PORT = 8080;
-in_addr_t HOST = inet_addr("127.0.0.1");
+//server details
+const static int PORT = 8086;
+const static in_addr_t HOST = inet_addr("127.0.0.1");
 
+//TCP parameters
 struct sockaddr_in server_addr{
     .sin_family = AF_INET,
     .sin_port = htons(PORT),
@@ -80,15 +82,16 @@ bool recive_connection(){
             }
 
             uint16_t ack_flags = tcp_header::unpack_flags(ntohs(ack.data_flags));
-            uint16_t ack_number = ntohs(ack.ack_number);
-            uint16_t seq_number = ntohs(ack.seq_number);
+            uint16_t ack_seq   = ntohs(ack.seq_number);
+            uint16_t ack_num   = ntohs(ack.ack_number);
 
-            bool valid_ack = ((ack_flags & tcp_header::FLAG_ACK) != 0) && 
-                             (ack_number == static_cast<uint16_t>(server_isn + 1)) && 
-                             (seq_number == static_cast<uint16_t>(client_isn + 1));
+            bool valid_ack =
+                (ack_flags & tcp_header::FLAG_ACK) &&
+                (ack_seq == static_cast<uint16_t>(client_isn + 1)) &&
+                (ack_num == static_cast<uint16_t>(server_isn + 1));
 
-            if(!valid_ack){
-                std::cerr << "Invalid ACK received, ignoring." << std::endl;
+            if (!valid_ack) {
+                std::cerr << "Invalid ACK received, ignoring.\n";
                 continue;
             }
 
@@ -103,8 +106,6 @@ bool recive_connection(){
         std::cerr << "Failed to create server: " << e.what() << std::endl;
         return false;
     }
-
-    return true;
 }
 
 
