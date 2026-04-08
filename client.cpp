@@ -28,6 +28,8 @@ struct sockaddr_in server_addr{
     .sin_zero = {0}
 };
 
+static bool TCP_handshake(int sock, uint16_t& next_seq, uint16_t& server_next_seq);
+
 bool estabilish_connection(){
     try{
         int sock = socket(AF_INET, SOCK_DGRAM, 0);
