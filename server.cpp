@@ -34,6 +34,10 @@ struct sockaddr_in server_addr{
     .sin_zero = {0}
 };
 
+inline static bool random_drop(int pct) {
+    return (std::rand() % 100) < pct;
+}
+
 static int create_socket(){
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if(sock < 0){
@@ -62,10 +66,10 @@ static bool recive_connection(int sock, sockaddr_in& client_addr, uint16_t& clie
         if((syn_flags & tcp_header::FLAG_SYN) == 0){
             std::cerr << "Received packet without SYN flag, ignoring." << std::endl;
         }
+        client_isn = ntohs(syn.seq_number);
         std::cout << "Received SYN from client with ISN: " << client_isn << std::endl;
         
         //Send SYN-ACK to client
-        client_isn = ntohs(syn.seq_number);
         server_isn = static_cast<uint16_t>(2000 + (std::rand() % 10000));
 
         Header syn_ack{
@@ -116,9 +120,9 @@ static bool recive_connection(int sock, sockaddr_in& client_addr, uint16_t& clie
 }
 
 static void receive_data_loop(int sock, const sockaddr_in& client_addr, uint16_t client_isn, uint16_t server_isn){
-    uint16_t expected_seq = static_cast<uint16_t>(client_isn++);
-    uint16_t server_seq = static_cast<uint16_t>(server_isn++);
-    
+    uint16_t expected_seq = static_cast<uint16_t>(client_isn + 1);
+    uint16_t server_seq = static_cast<uint16_t>(server_isn + 1);
+
     std::vector<char> packets(max_package_size);
 
     while(true){
@@ -153,8 +157,9 @@ static void receive_data_loop(int sock, const sockaddr_in& client_addr, uint16_t
             continue;
         }
 
-        if(tcp_header::random_drop(SIM_DROP)){
+        if(random_drop(SIM_DROP)){
             std::cout << "DROP DATA seq =" << seq << std::endl;
+            continue;
         }
 
         if(seq == expected_seq){
@@ -169,7 +174,7 @@ static void receive_data_loop(int sock, const sockaddr_in& client_addr, uint16_t
             .data_flags = htons(tcp_header::pack_data_flags(0, tcp_header::FLAG_ACK))
         };
 
-        if(tcp_header::random_drop(SIM_DROP)){
+        if(random_drop(SIM_DROP)){
             std::cout << "DROP ACK for seq = " << expected_seq << std::endl;
             continue;
         }
@@ -195,7 +200,7 @@ int main() {
         uint16_t client_isn = 0;
         uint16_t server_isn = 0;
 
-        if(!recive_connection(sock, server_addr, client_isn, server_isn)){
+        if(!recive_connection(sock, client_addr, client_isn, server_isn)){
             std::cerr << "Failed to receive connections." << std::endl;
             return 1;
         }

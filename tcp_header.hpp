@@ -44,8 +44,4 @@ namespace tcp_header{
         socklen_t addr_len = sizeof(recv_addr);
         return recvfrom(sock, &header, sizeof(header), 0, reinterpret_cast<sockaddr*>(&recv_addr), &addr_len) == (ssize_t)sizeof(header);
     }
-
-    inline static bool random_drop(int pct) {
-        return (std::rand() % 100) < pct;
-    }
 }

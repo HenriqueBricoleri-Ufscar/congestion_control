@@ -1,5 +1,10 @@
 #include <iostream>
 #include <cstdint>
+#include <ctime>
+#include <cstdlib>
+#include <cstring>
+#include <algorithm>
+#include <vector>
 
 #include <unistd.h>
 #include "tcp_header.hpp"
@@ -18,7 +23,14 @@ int CWND = 1024; //Congestion Window Size
 static int MSS = 1024;  //Maximum Segment Size
 static int RTO = 50; //Retransmission Timeout in milliseconds
 int max_package_size = MSS + sizeof(Header); //Maximum package size
-int initial_SSTHRESH = 15360; //Initial Slow Start Threshold
+int SSTHRESH = 15360; //Initial Slow Start Threshold
+
+enum class CCState {
+    SLOW_START,
+    CONGESTION_AVOIDANCE
+};
+
+static CCState cc_state = CCState::SLOW_START;
 
 //Server address structure
 struct sockaddr_in server_addr{
@@ -28,31 +40,41 @@ struct sockaddr_in server_addr{
     .sin_zero = {0}
 };
 
-static bool TCP_handshake(int sock, uint16_t& next_seq, uint16_t& server_next_seq);
+static bool set_timeout(int sock) {
+    timeval timeout{};
+    timeout.tv_sec = RTO / 1000;
+    timeout.tv_usec = (RTO % 1000) * 1000;
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        std::cerr << "Error setting socket timeout\n";
+        return false;
+    }
+    return true;
+}
 
-bool estabilish_connection(){
+static void on_ack_success(){
+    if(cc_state == CCState::SLOW_START){
+        CWND += MSS;
+        if(CWND >= SSTHRESH){
+            cc_state = CCState::CONGESTION_AVOIDANCE;
+        }   
+    } else {
+        CWND += (MSS * MSS) / std::max(CWND, 1);
+    }
+}
+
+static void on_timeout(){
+    SSTHRESH = std::max(CWND / 2, MSS);
+    CWND = MSS;
+    cc_state = CCState::SLOW_START;
+}
+
+
+static bool TCP_handshake(int sock, uint16_t& next_seq, uint16_t& server_next_seq){
     try{
-        int sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if(sock < 0){
-            std::cerr << "Error creating socket" << std::endl;
-            return false;
-        }
-
-        //Timeout configuration
-        timeval timeout;
-        timeout.tv_sec = RTO / 1000;
-        timeout.tv_usec = (RTO % 1000) * 1000;
-
-        if(setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0){
-            std::cerr << "Error setting socket timeout" << std::endl;
-            close(sock);
-            return false;
-        }
-
         //HANDSHAKE
         //generate random initial sequence number
-        std::srand(static_cast<unsigned int>(time(nullptr)));
-        uint16_t client_isn = static_cast<uint16_t>(1000 + std::rand() % 10000);
+        std::srand((unsigned)std::time(nullptr));
+        uint16_t client_isn = static_cast<uint16_t>(1000 + (std::rand() % 10000));
 
         //Send SYN
         Header syn{
@@ -64,7 +86,6 @@ bool estabilish_connection(){
 
         if(!tcp_header::send_header(sock, syn, server_addr)){
             std::cerr << "Error sending SYN" << std::endl;
-            close(sock);
             return false;
         }
         std::cout << "SYN sent with ISN: " << client_isn << std::endl;
@@ -74,7 +95,6 @@ bool estabilish_connection(){
         sockaddr_in recv_addr{};
         if(!tcp_header::recv_header(sock, syn_ack, recv_addr)){
             std::cerr << "Error receiving SYN-ACK" << std::endl;
-            close(sock);
             return false;
         }
 
@@ -86,7 +106,6 @@ bool estabilish_connection(){
 
         if(!valid_syn_ack){
             std::cerr << "Invalid SYN-ACK received" << std::endl;
-            close(sock);
             return false;
         }
         std::cout << "SYN-ACK received with ISN: " << ntohs(syn_ack.seq_number) << std::endl;
@@ -103,13 +122,14 @@ bool estabilish_connection(){
 
         if(!tcp_header::send_header(sock, ack, server_addr)){
             std::cerr << "Error sending ACK" << std::endl;
-            close(sock);
             return false;
         }
         std::cout << "ACK sent, connection established" << std::endl;
         std::cout << "TCP Connection established with server at " << inet_ntoa(server_addr.sin_addr) << ":" << ntohs(server_addr.sin_port) << std::endl;
 
-        close(sock);
+        next_seq = static_cast<uint16_t>(client_isn + 1);
+        server_next_seq = static_cast<uint16_t>(server_isn + 1);
+
         return true;
 
     } catch(const std::exception& e) {
@@ -118,12 +138,121 @@ bool estabilish_connection(){
     }
 }
 
+static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, uint16_t& server_next_seq){
+    size_t offset = 0;
+    std::vector<char> packet(max_package_size);
+
+    while(offset < data.size()){
+        int seg_len = std::min(static_cast<int>(data.size() - offset), MSS);
+        int in_flight_limit = std::max(MSS, CWND);
+        
+        Header header{
+            .seq_number = htons(seq),
+            .ack_number = htons(server_next_seq),
+            .rwnd = htons(0),
+            .data_flags = htons(tcp_header::pack_data_flags(static_cast<uint16_t>(seg_len), 0))
+        };
+        std::memcpy(packet.data(), &header, sizeof(Header));
+        std::memcpy(packet.data() + sizeof(Header), data.data() + offset, seg_len);
+
+        ssize_t sent_len = sendto(sock, packet.data(), sizeof(Header) + seg_len, 0, reinterpret_cast<const sockaddr*>(&server_addr), sizeof(server_addr));
+        if(sent_len != static_cast<ssize_t>(sizeof(Header) + seg_len)){
+            std::cerr << "Error sending data segment" << std::endl;
+            return false;
+        }
+
+        Header ack{};
+        sockaddr_in from{};
+        if (!tcp_header::recv_header(sock, ack, from)) {
+            // timeout => perda
+            on_timeout();
+            std::cout << "[TIMEOUT] CWND=" << CWND << " SSTHRESH=" << SSTHRESH << std::endl;
+            continue; // retransmite mesmo segmento
+        }
+
+        uint16_t ack_flags = tcp_header::unpack_flags(ntohs(ack.data_flags));
+        uint16_t ack_number = ntohs(ack.ack_number);
+        uint16_t expected_ack = static_cast<uint16_t>(seq + seg_len);
+
+        if ((ack_flags & tcp_header::FLAG_ACK) && ack_number == expected_ack) {
+            seq = expected_ack;
+            offset += seg_len;
+            on_ack_success();
+            std::cout << "[ACK] bytes=" << offset << "/" << data.size()
+                      << " CWND=" << CWND << " SSTHRESH=" << SSTHRESH
+                      << " mode=" << (cc_state == CCState::SLOW_START ? "SS" : "CA") << "\n";
+        } else {
+            on_timeout();
+            std::cout << "[BAD ACK] CWND=" << CWND << " SSTHRESH=" << SSTHRESH << "\n";
+        }
+    }
+
+    return true;
+}
+
+static bool close_connection(int sock, const sockaddr_in& client_addr, uint16_t next_seq, uint16_t server_next_seq){
+    //FIN ack
+    Header fin_ack{
+        .seq_number = htons(next_seq),
+        .ack_number = htons(server_next_seq),
+        .rwnd = htons(0),
+        .data_flags = htons(tcp_header::pack_data_flags(0, tcp_header::FLAG_ACK | tcp_header::FLAG_FIN))
+    };
+
+    if(!tcp_header::send_header(sock, fin_ack, client_addr)){
+        std::cerr << "Error sending FIN-ACK" << std::endl;
+        return false;
+    }
+    std::cout << "Sent FIN-ACK, closing connection" << std::endl;
+    close(sock);
+    return true;
+}
+
+static int estabilish_connection(int sock, uint16_t& next_seq, uint16_t& server_next_seq){
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+
+    if(sock < 0){
+        std::cerr << "Error creating socket" << std::endl;
+        return -1;
+    }
+
+    if (!set_timeout(sock)) {
+        close(sock);
+        return -1;
+    }
+
+    if(!TCP_handshake(sock, next_seq, server_next_seq)){
+        close(sock);
+        return -1;
+    }
+
+    return sock; 
+}
+
 int main() {
+
+    int sock = -1;
+    uint16_t next_seq = 0;
+    uint16_t server_next_seq = 0;
     
-    if (!estabilish_connection()){
+    if(estabilish_connection(sock, next_seq, server_next_seq) < 0){
         std::cerr << "Failed to establish connection." << std::endl;
-    } 
-    std::cout << "Connection established successfully!" << std::endl;
+    } else {
+        std::cout << "Connection established successfully!" << std::endl;
+
+        std::string text = "Mini TCP over UDP payload ";
+        std::string big;
+        for (int i = 0; i < 500; ++i) big += text;
+
+        std::vector<char> payload(big.begin(), big.end());
+
+        if (!send_data(sock, payload, next_seq, server_next_seq)) {
+            close(sock);
+            return false;
+        }
+
+        close_connection(sock, server_addr, next_seq, server_next_seq);
+    }
 
     return 0;
 }
