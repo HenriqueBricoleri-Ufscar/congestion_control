@@ -156,8 +156,8 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
         std::memcpy(packet.data() + sizeof(Header), data.data() + offset, seg_len);
 
         ssize_t sent_len = sendto(sock, packet.data(), sizeof(Header) + seg_len, 0, reinterpret_cast<const sockaddr*>(&server_addr), sizeof(server_addr));
-        if(sent_len != static_cast<ssize_t>(sizeof(Header) + seg_len)){
-            std::cerr << "Error sending data segment" << std::endl;
+        if (sent_len < 0) {
+            perror("sendto");
             return false;
         }
 
@@ -203,13 +203,13 @@ static bool close_connection(int sock, const sockaddr_in& client_addr, uint16_t 
         std::cerr << "Error sending FIN-ACK" << std::endl;
         return false;
     }
-    std::cout << "Sent FIN-ACK, closing connection" << std::endl;
+    std::cout << "Sent FIN, closing connection" << std::endl;
     close(sock);
     return true;
 }
 
-static int estabilish_connection(int sock, uint16_t& next_seq, uint16_t& server_next_seq){
-    sock = socket(AF_INET, SOCK_DGRAM, 0);
+static int estabilish_connection(uint16_t& next_seq, uint16_t& server_next_seq){
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
 
     if(sock < 0){
         std::cerr << "Error creating socket" << std::endl;
@@ -231,24 +231,26 @@ static int estabilish_connection(int sock, uint16_t& next_seq, uint16_t& server_
 
 int main() {
 
-    int sock = -1;
     uint16_t next_seq = 0;
     uint16_t server_next_seq = 0;
     
-    if(estabilish_connection(sock, next_seq, server_next_seq) < 0){
+    int sock = estabilish_connection(next_seq, server_next_seq);
+    if(sock < 0){
         std::cerr << "Failed to establish connection." << std::endl;
     } else {
         std::cout << "Connection established successfully!" << std::endl;
 
         std::string text = "Mini TCP over UDP payload ";
         std::string big;
-        for (int i = 0; i < 500; ++i) big += text;
+        for (int i = 0; i < 750; ++i) big += text;
 
         std::vector<char> payload(big.begin(), big.end());
 
+        std::cout << "Sending data of size: " << payload.size() << " bytes" << std::endl;
+
         if (!send_data(sock, payload, next_seq, server_next_seq)) {
             close(sock);
-            return false;
+            return 1;
         }
 
         close_connection(sock, server_addr, next_seq, server_next_seq);
