@@ -6,8 +6,8 @@
 #include <algorithm>
 #include <vector>
 
-#include <unistd.h>
 #include "tcp_header.hpp"
+#include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -16,7 +16,7 @@ using tcp_header::Header;
 
 //server details
 const static int PORT = 8086;
-const static in_addr_t HOST = inet_addr("127.0.0.1");
+const static in_addr_t HOST = inet_addr("200.133.238.213");
 
 //TCP parameters
 int CWND = 1024; //Congestion Window Size
@@ -45,7 +45,7 @@ static bool set_timeout(int sock) {
     timeout.tv_sec = RTO / 1000;
     timeout.tv_usec = (RTO % 1000) * 1000;
     if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
-        std::cerr << "Error setting socket timeout\n";
+        std::cerr << "Error setting socket timeout" << std::endl;
         return false;
     }
     return true;
@@ -144,7 +144,6 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
 
     while(offset < data.size()){
         int seg_len = std::min(static_cast<int>(data.size() - offset), MSS);
-        int in_flight_limit = std::max(MSS, CWND);
         
         Header header{
             .seq_number = htons(seq),
@@ -157,7 +156,7 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
 
         ssize_t sent_len = sendto(sock, packet.data(), sizeof(Header) + seg_len, 0, reinterpret_cast<const sockaddr*>(&server_addr), sizeof(server_addr));
         if (sent_len < 0) {
-            perror("sendto");
+            std::cerr << "[sendto failed] ACK = " << server_next_seq << std::endl;
             return false;
         }
 

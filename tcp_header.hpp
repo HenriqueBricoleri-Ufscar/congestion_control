@@ -32,10 +32,6 @@ namespace tcp_header{
         return static_cast<uint16_t>(data_flags & 0x7);
     }
 
-    inline bool is_ack(uint16_t data_flags){
-        return (data_flags & FLAG_ACK) != 0;
-    }
-
     inline bool send_header(int sock, const Header& header, const sockaddr_in& addr){
         return sendto(sock, &header, sizeof(header), 0, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == (ssize_t)sizeof(header);
     }

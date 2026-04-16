@@ -14,13 +14,12 @@ using tcp_header::Header;
 
 //server details
 const static int PORT = 8086;
-const static in_addr_t HOST = inet_addr("127.0.0.1");
+const static in_addr_t HOST = inet_addr("0.0.0.0");
 
 
 //TCP parameters
 int CWND = 1024; //Congestion Window Size
 static int MSS = 1024;  //Maximum Segment Size
-static int RTO = 50; //Retransmission Timeout in milliseconds
 int max_package_size = MSS + sizeof(Header); //Maximum package size
 int initial_SSTHRESH = 15360; //Initial Slow Start Threshold
 
@@ -59,7 +58,7 @@ static bool recive_connection(int sock, sockaddr_in& client_addr, uint16_t& clie
         //Receive SYN from client
         Header syn{};
         if(!tcp_header::recv_header(sock, syn, client_addr)){
-            std::cerr << "Error receiving data" << std::endl;
+            std::cerr << "Error receiving TCP header" << std::endl;
         }
 
         uint16_t syn_flags = tcp_header::unpack_flags(ntohs(syn.data_flags));
