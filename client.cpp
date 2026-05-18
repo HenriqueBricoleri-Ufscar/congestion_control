@@ -21,13 +21,14 @@ const static in_addr_t HOST = inet_addr("200.133.238.213");
 //TCP parameters
 int CWND = 1024; //Congestion Window Size
 static int MSS = 1024;  //Maximum Segment Size
-static int RTO = 50; //Retransmission Timeout in milliseconds
+static int RTO = 500; //Retransmission Timeout in milliseconds
 int max_package_size = MSS + sizeof(Header); //Maximum package size
 int SSTHRESH = 15360; //Initial Slow Start Threshold
 
 enum class CCState {
     SLOW_START,
-    CONGESTION_AVOIDANCE
+    CONGESTION_AVOIDANCE,
+    FAST_RECOVERY
 };
 
 static CCState cc_state = CCState::SLOW_START;
@@ -67,7 +68,6 @@ static void on_timeout(){
     CWND = MSS;
     cc_state = CCState::SLOW_START;
 }
-
 
 static bool TCP_handshake(int sock, uint16_t& next_seq, uint16_t& server_next_seq){
     try{
