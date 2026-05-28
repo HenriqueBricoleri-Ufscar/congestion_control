@@ -7,6 +7,7 @@
 #include <vector>
 #include <map>
 #include <chrono>
+#include <climits>
 
 #include "tcp_header.hpp"
 #include <unistd.h>
@@ -17,6 +18,10 @@
 using tcp_header::Header;
 using Clock = std::chrono::steady_clock;
 using Ms = std::chrono::milliseconds;
+
+//=============================================
+//              TCP PARAMETERS
+//=============================================
 
 // Server details
 const static int PORT = 8086;
@@ -52,8 +57,13 @@ struct sockaddr_in server_addr{
 struct sent_packet {
     std::vector<char> data;
     uint16_t seg_len;
+    Clock::time_point deadline;
 };
 static std::map<uint16_t, sent_packet> send_buffer;
+
+//====================================================
+//                  AUX METHODS
+//====================================================
 
 static void log_packet(const char* type, uint16_t seq, uint16_t ack, uint16_t len) {
     std::cout << "[" << type << "] seq=" << seq
@@ -98,6 +108,23 @@ static bool set_timeout(int sock, int ms) {
     tv.tv_usec = (ms % 1000) * 1000;
     return setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0;
 }
+
+static long min_deadling_remaining(){
+    //itera sobre todos os pacotes enviados e altera as deadlines, se for < 0, timeout!
+    auto now = Clock::now();
+    long min_rem = LONG_MAX;
+
+    for (auto& [snum, spkt] : send_buffer){
+        long rem = std::chrono::duration_cast<Ms>(spkt.deadline - now).count();
+        if(rem < min_rem) min_rem = rem;
+    }
+
+    return (min_rem == LONG_MAX) ? RTO : min_rem;
+}
+
+//=====================================================
+//                    TCP METHODS
+//=====================================================
 
 static bool TCP_handshake(int sock, uint16_t& next_seq, uint16_t& server_next_seq) {
     std::srand((unsigned)std::time(nullptr));
@@ -157,145 +184,155 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
     const uint16_t base_seq = seq;
     const size_t total_size = data.size();
 
-    size_t unacked_off = 0;
-    size_t next_off = 0;
-
-    auto make_seq = [&](size_t offset) -> uint16_t {
-        return static_cast<uint16_t>(base_seq + offset);
-    };
+    ssize_t unacked_off = 0;
+    ssize_t next_off = 0;
 
     send_buffer.clear();
 
-    Clock::time_point rto_deadline{};
-    bool rto_armed = false;
-
-    auto arm_rto = [&]() {
-        rto_deadline = Clock::now() + Ms(RTO);
-        rto_armed = true;
+    //===========================
+    //      Inner Methods
+    //===========================
+    
+    auto make_seq = [&](ssize_t offset) -> uint16_t { 
+        return static_cast<uint16_t>(base_seq + offset); 
     };
 
-    while (unacked_off < total_size) {
+    auto send = [&] (ssize_t offset) -> bool {
+        int seg_size = static_cast<int>(std::min(static_cast<size_t>(MSS), total_size - offset));
+
+        uint16_t seq_num = make_seq(offset);
+        Header header {
+            .seq_number = htons(seq_num),
+            .ack_number = htons(server_next_seq),
+            .rwnd = htons(0),
+            .data_flags = htons(tcp_header::pack_data_flags(static_cast<uint16_t>(seg_size), 0))
+        };
+
+        std::vector<char> packet(sizeof(Header) + seg_size);
+        std::memcpy(packet.data(), &header, sizeof(Header));
+        std::memcpy(packet.data() + sizeof(Header), data.data() + offset, seg_size);
+
+        //Buffer & packet timeout
+        send_buffer[seq_num] = {std::move(packet), static_cast<uint16_t>(seg_size), {}};
+        sent_packet& sp = send_buffer[seq_num];
+
+        sp.deadline = Clock::now() + Ms(RTO);
+
+        if(sendto(sock, packet.data(), packet.size(), 0, reinterpret_cast<const sockaddr*>(&server_addr), sizeof(server_addr)) < 0){
+            std::cerr << "failed to send packet SEQ = " << seq_num << std::endl;
+            return false;
+        }
+
+        return true;
+    };
+
+    while(unacked_off < total_size) {
+        //Inflight <= CWND
         int in_flight = static_cast<int>(next_off - unacked_off);
 
-        while (in_flight < CWND && next_off < total_size) {
-            int seg = static_cast<int>(std::min(static_cast<size_t>(MSS), total_size - next_off));
-            uint16_t seq_num = make_seq(next_off);
+        //make payload
+        while(in_flight < CWND && next_off < total_size){
+            int seg = static_cast<int>(std::min((size_t)MSS, total_size - next_off));
+            if (!send(next_off)) return false;
 
-            Header hdr{
-                .seq_number = htons(seq_num),
-                .ack_number = htons(server_next_seq),
-                .rwnd = htons(0),
-                .data_flags = htons(tcp_header::pack_data_flags(static_cast<uint16_t>(seg), 0))
-            };
-
-            std::vector<char> pkt(sizeof(Header) + seg);
-            std::memcpy(pkt.data(), &hdr, sizeof(Header));
-            std::memcpy(pkt.data() + sizeof(Header), data.data() + next_off, seg);
-
-            if (sendto(sock, pkt.data(), pkt.size(), 0,
-                       reinterpret_cast<const sockaddr*>(&server_addr),
-                       sizeof(server_addr)) < 0) {
-                std::cerr << "sendto failed seq=" << seq_num << "\n";
-                return false;
-            }
-
-            send_buffer[seq_num] = { std::move(pkt), static_cast<uint16_t>(seg) };
-            log_packet("DATA", seq_num, server_next_seq, static_cast<uint16_t>(seg));
-
-            if (!rto_armed) arm_rto();
-
-            next_off += seg;
-            in_flight = static_cast<int>(next_off - unacked_off);
+            log_packet("DATA", make_seq(next_off), server_next_seq, static_cast<uint16_t>(seg));
+            
+            next_off  += seg;
+            in_flight  = static_cast<int>(next_off - unacked_off);
         }
 
-        long remaining_ms = RTO;
-        if (rto_armed) {
-            remaining_ms = std::chrono::duration_cast<Ms>(rto_deadline - Clock::now()).count();
-            if (remaining_ms <= 0) {
-                on_timeout();
-                next_off = unacked_off;
-                rto_armed = false;
-                send_buffer.clear();
-                continue;
-            }
-        }
+        long min_rem = min_deadling_remaining();
 
-        set_timeout(sock, static_cast<int>(remaining_ms));
-
-        Header ack_hdr{};
-        sockaddr_in from{};
-        if (!tcp_header::recv_header(sock, ack_hdr, from)) {
+        if(min_rem <= 0 ){
             on_timeout();
             next_off = unacked_off;
-            rto_armed = false;
             send_buffer.clear();
             continue;
         }
 
-        uint16_t fl = tcp_header::unpack_flags(ntohs(ack_hdr.data_flags));
-        if (!(fl & tcp_header::FLAG_ACK)) continue;
+        set_timeout(sock, static_cast<int>(min_rem));
+
+        //Wait for Cumulative ACK
+        Header ack_hdr {};
+        sockaddr_in from{};
+
+        if(!tcp_header::recv_header(sock, ack_hdr, from)){
+            //Socket timeout
+            auto now = Clock::now();
+            bool expired = false;
+
+            for(auto& [snmb, spkt] : send_buffer) 
+                if(now >= spkt.deadline) {
+                    expired = true;
+                    break;
+                }
+            
+            if(expired) {
+                on_timeout();
+                next_off = unacked_off;
+                send_buffer.clear();
+            }
+
+            continue;
+        }
+        
+        uint16_t flags = tcp_header::unpack_flags(ntohs(ack_hdr.data_flags));
+        if(!(flags & tcp_header::FLAG_ACK)) continue;
 
         uint16_t ack_num = ntohs(ack_hdr.ack_number);
         size_t ack_off = static_cast<size_t>(static_cast<uint16_t>(ack_num - base_seq));
 
-        if (ack_off > unacked_off && ack_off <= total_size) {
-            size_t bytes_acked = ack_off - unacked_off;
-            bool was_fr = (cc_state == CCState::FAST_RECOVERY);
 
-            for (auto it = send_buffer.begin(); it != send_buffer.end(); ) {
+        //New ACK, Not dup-ACK
+        if(ack_off > unacked_off && ack_off <= total_size){
+            size_t bytes_acked = ack_off - unacked_off;
+            
+            for(auto it = send_buffer.begin(); it != send_buffer.end(); ){
                 size_t seg_off = static_cast<size_t>(static_cast<uint16_t>(it->first - base_seq));
-                if (seg_off + it->second.seg_len <= ack_off)
+                if(seg_off + it->second.seg_len <= ack_off){
                     it = send_buffer.erase(it);
-                else
+                } else {
                     ++it;
+                }
             }
 
             unacked_off = ack_off;
             dup_ack_count = 0;
-
-            if (unacked_off < next_off) arm_rto();
-            else rto_armed = false;
-
             log_packet("ACK", 0, ack_num, 0);
 
-            if (was_fr && ack_off < fr_target_seq) {
-                CWND -= static_cast<int>(bytes_acked);
-                CWND = std::max(CWND, MSS);
-                CWND += MSS;
-
+            if((cc_state == CCState::FAST_RECOVERY) && ack_off < fr_target_seq){
+                //Partial ACK during FR
+                CWND = std::max(CWND - static_cast<int>(bytes_acked), MSS) + MSS;
                 uint16_t retx = make_seq(unacked_off);
-                auto it = send_buffer.find(retx);
-                if (it != send_buffer.end()) {
-                    sendto(sock, it->second.data.data(), it->second.data.size(), 0,
-                           reinterpret_cast<const sockaddr*>(&server_addr),
-                           sizeof(server_addr));
-                    log_packet("RETX(FR)", retx, server_next_seq, it->second.seg_len);
+
+                if(send_buffer.count(retx)){
+                    send(unacked_off);
+                    log_packet("RETX(FR)", retx, server_next_seq, send_buffer[retx].seg_len);
                 }
-                arm_rto();
             } else {
                 on_ack();
             }
-
-        } else if (ack_off == unacked_off) {
+        //dup-ACK
+        } else if (ack_off == unacked_off){
             dup_ack_count++;
             log_packet("DUP-ACK", 0, ack_num, 0);
 
-            if (dup_ack_count == 3) {
+            //3 dup-ACK's -> FR
+            if (dup_ack_count == 3){
                 int flight = static_cast<int>(next_off - unacked_off);
-                SSTHRESH = std::max(flight / 2, 2 * MSS);
-                CWND = SSTHRESH + 3 * MSS;
+                
+                //FR
+                SSTHRESH    = std::max(flight / 2, 2 * MSS);
+                CWND        = SSTHRESH + 3 * MSS;
                 fr_target_seq = next_off;
-                cc_state = CCState::FAST_RECOVERY;
+                cc_state    = CCState::FAST_RECOVERY;
 
                 uint16_t retx = make_seq(unacked_off);
-                auto it = send_buffer.find(retx);
-                if (it != send_buffer.end()) {
-                    sendto(sock, it->second.data.data(), it->second.data.size(), 0, reinterpret_cast<const sockaddr*>(&server_addr), sizeof(server_addr));
-                    log_packet("RETX(FAST)", retx, server_next_seq, it->second.seg_len);
-                }
-                arm_rto();
-
-            } else if (dup_ack_count > 3 && cc_state == CCState::FAST_RECOVERY) {
+                if (send_buffer.count(retx)) {
+                    send(unacked_off);
+                    log_packet("RETX(FAST)", retx, server_next_seq, send_buffer[retx].seg_len);
+                } 
+            } else if (dup_ack_count > 3 && cc_state == CCState::FAST_RECOVERY){
                 CWND += MSS;
             }
         }
