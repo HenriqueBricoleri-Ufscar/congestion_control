@@ -7,6 +7,7 @@
 #include <vector>
 #include <map>
 #include <chrono>
+#include <fstream>
 #include <climits>
 
 #include "tcp_header.hpp"
@@ -20,12 +21,19 @@ using Clock = std::chrono::steady_clock;
 using Ms = std::chrono::milliseconds;
 
 //=============================================
+//              Plot Archive
+//=============================================
+
+static std::ofstream cwnd_log;
+static Clock::time_point t0;
+
+//=============================================
 //              TCP PARAMETERS
 //=============================================
 
 // Server details
 const static int PORT = 8086;
-const static in_addr_t HOST = inet_addr("200.133.238.213");
+const static in_addr_t HOST = inet_addr("127.0.0.1");
 
 // TCP parameters (mesmos nomes do segundo código)
 int CWND = 1024;               // Congestion Window Size
@@ -65,7 +73,14 @@ static std::map<uint16_t, sent_packet> send_buffer;
 //                  AUX METHODS
 //====================================================
 
+static void log_cwnd(const char* event, uint16_t seq = 0) {
+    auto ms = std::chrono::duration_cast<Ms>(Clock::now() - t0).count();
+    cwnd_log << ms << "," << event << "," << CWND << "," << SSTHRESH << "," << seq << "\n";
+    cwnd_log.flush();
+}
+
 static void log_packet(const char* type, uint16_t seq, uint16_t ack, uint16_t len) {
+
     std::cout << "[" << type << "] seq=" << seq
               << " ack=" << ack
               << " pkt_len=" << len
@@ -81,6 +96,8 @@ static void on_timeout() {
     CWND = MSS;
     cc_state = CCState::SLOW_START;
     dup_ack_count = 0;
+
+    log_cwnd("TIMEOUT");
 }
 
 static void on_ack() {
@@ -90,14 +107,17 @@ static void on_ack() {
             if (CWND >= SSTHRESH) {
                 cc_state = CCState::CONGESTION_AVOIDANCE;
             }
+            log_cwnd("ACK_SS");
             break;
         case CCState::CONGESTION_AVOIDANCE:
             CWND += (MSS * MSS) / std::max(CWND, 1);
+            log_cwnd("ACK_CA");
             break;
         case CCState::FAST_RECOVERY:
             CWND = SSTHRESH;
             cc_state = CCState::CONGESTION_AVOIDANCE;
             dup_ack_count = 0;
+            log_cwnd("FR_EXIT");
             break;
     }
 }
@@ -184,8 +204,8 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
     const uint16_t base_seq = seq;
     const size_t total_size = data.size();
 
-    ssize_t unacked_off = 0;
-    ssize_t next_off = 0;
+    size_t unacked_off = 0;
+    size_t next_off = 0;
 
     send_buffer.clear();
 
@@ -193,11 +213,11 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
     //      Inner Methods
     //===========================
     
-    auto make_seq = [&](ssize_t offset) -> uint16_t { 
+    auto make_seq = [&](size_t offset) -> uint16_t { 
         return static_cast<uint16_t>(base_seq + offset); 
     };
 
-    auto send = [&] (ssize_t offset) -> bool {
+    auto send = [&] (size_t offset) -> bool {
         int seg_size = static_cast<int>(std::min(static_cast<size_t>(MSS), total_size - offset));
 
         uint16_t seq_num = make_seq(offset);
@@ -218,7 +238,7 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
 
         sp.deadline = Clock::now() + Ms(RTO);
 
-        if(sendto(sock, packet.data(), packet.size(), 0, reinterpret_cast<const sockaddr*>(&server_addr), sizeof(server_addr)) < 0){
+        if(sendto(sock, send_buffer[seq_num].data.data(), send_buffer[seq_num].data.size(), 0, reinterpret_cast<const sockaddr*>(&server_addr), sizeof(server_addr)) < 0){
             std::cerr << "failed to send packet SEQ = " << seq_num << std::endl;
             return false;
         }
@@ -303,6 +323,7 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
             if((cc_state == CCState::FAST_RECOVERY) && ack_off < fr_target_seq){
                 //Partial ACK during FR
                 CWND = std::max(CWND - static_cast<int>(bytes_acked), MSS) + MSS;
+                log_cwnd("PARTIAL_ACK", make_seq(unacked_off));
                 uint16_t retx = make_seq(unacked_off);
 
                 if(send_buffer.count(retx)){
@@ -326,6 +347,7 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
                 CWND        = SSTHRESH + 3 * MSS;
                 fr_target_seq = next_off;
                 cc_state    = CCState::FAST_RECOVERY;
+                log_cwnd("FR_ENTER", make_seq(unacked_off));
 
                 uint16_t retx = make_seq(unacked_off);
                 if (send_buffer.count(retx)) {
@@ -368,6 +390,8 @@ static int estabilish_connection(uint16_t& next_seq, uint16_t& server_next_seq) 
 }
 
 int main() {
+    t0 = Clock::now();
+
     uint16_t next_seq = 0;
     uint16_t server_next_seq = 0;
 
@@ -379,9 +403,14 @@ int main() {
 
     std::string text = "Mini TCP over UDP payload ";
     std::string big;
-    for (int i = 0; i < 750; ++i) big += text;
+    for (int i = 0; i < 1750; ++i) big += text;
 
     std::vector<char> payload(big.begin(), big.end());
+
+    cwnd_log.open("data/cwnd_log_" + std::to_string(payload.size()) + "B.csv");
+    cwnd_log << "time_ms,event,cwnd,ssthresh,seq\n";
+
+    std::cout << "Sending " << payload.size() << " Bytes" << std::endl;
 
     if (!send_data(sock, payload, next_seq, server_next_seq)) {
         close(sock);
