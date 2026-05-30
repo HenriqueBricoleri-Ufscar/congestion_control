@@ -206,6 +206,7 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
 
     size_t unacked_off = 0;
     size_t next_off = 0;
+    uint32_t rwnd = UINT16_MAX;
 
     send_buffer.clear();
 
@@ -250,8 +251,25 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
         //Inflight <= CWND
         int in_flight = static_cast<int>(next_off - unacked_off);
 
+        uint32_t eff_wnd = std::min(static_cast<uint32_t>(CWND), rwnd);
+
+        if(eff_wnd == 0) {
+            //Buffer do receptor zerado
+            set_timeout(sock, RTO);
+            Header zero_ack{}; 
+            sockaddr_in from{};
+            if(tcp_header::recv_header(sock, zero_ack, from)) {
+                rwnd = ntohs(zero_ack.rwnd);
+            } else {
+                on_timeout();
+                next_off = unacked_off;
+                send_buffer.clear();
+            }
+            continue;
+        }
+
         //make payload
-        while(in_flight < CWND && next_off < total_size){
+        while(static_cast<uint32_t>(in_flight) < eff_wnd && next_off < total_size){
             int seg = static_cast<int>(std::min((size_t)MSS, total_size - next_off));
             if (!send(next_off)) return false;
 
@@ -299,6 +317,8 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
         uint16_t flags = tcp_header::unpack_flags(ntohs(ack_hdr.data_flags));
         if(!(flags & tcp_header::FLAG_ACK)) continue;
 
+        rwnd = ntohs(ack_hdr.rwnd);
+
         uint16_t ack_num = ntohs(ack_hdr.ack_number);
         size_t ack_off = static_cast<size_t>(static_cast<uint16_t>(ack_num - base_seq));
 
@@ -339,7 +359,7 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
             log_packet("DUP-ACK", 0, ack_num, 0);
 
             //3 dup-ACK's -> FR
-            if (dup_ack_count == 3){
+            if (dup_ack_count == 3 && rwnd != 0){
                 int flight = static_cast<int>(next_off - unacked_off);
                 
                 //FR
@@ -403,7 +423,7 @@ int main() {
 
     std::string text = "Mini TCP over UDP payload ";
     std::string big;
-    for (int i = 0; i < 1750; ++i) big += text;
+    for (int i = 0; i < 750; ++i) big += text;
 
     std::vector<char> payload(big.begin(), big.end());
 

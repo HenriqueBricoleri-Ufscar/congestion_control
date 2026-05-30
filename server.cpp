@@ -5,6 +5,7 @@
 #include <cstring>
 #include <ctime>
 #include <map>
+#include <chrono>
 
 #include <unistd.h>
 #include "tcp_header.hpp"
@@ -13,6 +14,8 @@
 #include <netinet/in.h>
 
 using tcp_header::Header;
+using Clock = std::chrono::steady_clock;
+using Ms = std::chrono::milliseconds;
 
 //server details
 const static int PORT = 8086;
@@ -123,6 +126,11 @@ static void receive_data_loop(int sock, const sockaddr_in& client_addr, uint16_t
     uint16_t expected_seq = static_cast<uint16_t>(client_isn + 1);
     uint16_t server_seq = static_cast<uint16_t>(server_isn + 1);
 
+    //Flow Control
+    static constexpr uint32_t RECV_BUF_SIZE = 16 * 1024; //16kB de buffer
+    static constexpr uint32_t APP_READ_RATE  = 4 * 1024; //Sim buffer free algorithm
+    uint32_t recv_buf_used = 0;
+
     //Buffer for out-of-order packets
     struct oooBuffer {
         std::vector<char> data;
@@ -134,11 +142,30 @@ static void receive_data_loop(int sock, const sockaddr_in& client_addr, uint16_t
     std::vector<char> received_data_raw(max_package_size); //Buffer for received data
     ssize_t received_data_size = 0;
 
+    auto drain_buffer = [&]() {
+
+        uint32_t drained = static_cast<uint32_t>((std::rand() % APP_READ_RATE) * recv_buf_used/APP_READ_RATE);
+
+        if (drained >= recv_buf_used)
+            recv_buf_used = 0;
+        else
+            recv_buf_used -= drained;
+
+        std::cout << "[BUFFER] used=" << recv_buf_used
+                  << " free=" << (RECV_BUF_SIZE - recv_buf_used)
+                  << " drained=" << drained << "B\n";
+    };
+
+
     auto send_ack = [&]() -> bool {
+        drain_buffer();
+
+        uint16_t free_space = static_cast<uint16_t>(RECV_BUF_SIZE - recv_buf_used);
+
         Header ack{
             .seq_number = htons(server_seq),
             .ack_number = htons(expected_seq),
-            .rwnd = htons(0),
+            .rwnd = htons(free_space),
             .data_flags = htons(tcp_header::pack_data_flags(0, tcp_header::FLAG_ACK))
         };
 
@@ -191,8 +218,16 @@ static void receive_data_loop(int sock, const sockaddr_in& client_addr, uint16_t
             continue;
         }
 
+        if (recv_buf_used + data_len > RECV_BUF_SIZE) {
+            std::cerr << "[BUFFER] FULL — descartando seq=" << seq_num << "\n";
+            send_ack();
+            continue;
+        }
+
         //In order packet treatment
         if(seq_num == expected_seq){
+            recv_buf_used += data_len; 
+
             received_data_size += data_len;
             expected_seq = static_cast<uint16_t>(expected_seq + data_len);
 
@@ -235,6 +270,7 @@ static void receive_data_loop(int sock, const sockaddr_in& client_addr, uint16_t
                         << std::endl;
 
             if(!out_of_order_buffer.count(seq_num)){
+                recv_buf_used += data_len;
                 std::vector<char> data(received_data_raw.begin() + sizeof(Header), received_data_raw.begin() + sizeof(Header) + data_len);
                 out_of_order_buffer[seq_num] = {std::move(data), data_len};
             }
