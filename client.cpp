@@ -206,7 +206,7 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
 
     size_t unacked_off = 0;
     size_t next_off = 0;
-    uint32_t rwnd = UINT16_MAX;
+    uint32_t rwnd = UINT32_MAX;
 
     send_buffer.clear();
 
@@ -247,13 +247,17 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
         return true;
     };
 
+    //-----------------
+    //  Data treat.
+    //-----------------
+
     while(unacked_off < total_size) {
         //Inflight <= CWND
         int in_flight = static_cast<int>(next_off - unacked_off);
 
-        uint32_t eff_wnd = std::min(static_cast<uint32_t>(CWND), rwnd);
+        uint32_t snd_wnd = std::min(static_cast<uint32_t>(CWND), rwnd);
 
-        if(eff_wnd == 0) {
+        if(snd_wnd == 0) {
             //Buffer do receptor zerado
             set_timeout(sock, RTO);
             Header zero_ack{}; 
@@ -269,7 +273,7 @@ static bool send_data(int sock, const std::vector<char>& data, uint16_t& seq, ui
         }
 
         //make payload
-        while(static_cast<uint32_t>(in_flight) < eff_wnd && next_off < total_size){
+        while(static_cast<uint32_t>(in_flight) < snd_wnd && next_off < total_size){
             int seg = static_cast<int>(std::min((size_t)MSS, total_size - next_off));
             if (!send(next_off)) return false;
 
@@ -423,7 +427,7 @@ int main() {
 
     std::string text = "Mini TCP over UDP payload ";
     std::string big;
-    for (int i = 0; i < 750; ++i) big += text;
+    for (int i = 0; i < 1000; ++i) big += text;
 
     std::vector<char> payload(big.begin(), big.end());
 
